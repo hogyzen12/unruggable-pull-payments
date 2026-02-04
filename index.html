@@ -102,9 +102,16 @@
         }
 
         function pad32(bytes) {
-            if (bytes.length === 32) return bytes;
+            let b = bytes;
+            while (b.length > 32 && b[0] === 0x00) {
+                b = b.slice(1);
+            }
+            if (b.length > 32) {
+                throw new Error("value too large");
+            }
+            if (b.length === 32) return b;
             const out = new Uint8Array(32);
-            out.set(bytes, 32 - bytes.length);
+            out.set(b, 32 - b.length);
             return out;
         }
 
@@ -134,21 +141,27 @@
 
         function derToRawSig(der) {
             let offset = 0;
+            if (der.length < 8) throw new Error("bad DER");
             if (der[offset++] !== 0x30) throw new Error("bad DER");
             let len = der[offset++];
             if (len & 0x80) {
                 const n = len & 0x7f;
+                if (offset + n > der.length) throw new Error("bad DER");
                 len = 0;
                 for (let i = 0; i < n; i++) {
                     len = (len << 8) | der[offset++];
                 }
             }
-            if (der[offset++] !== 0x02) throw new Error("bad DER");
+            if (offset >= der.length || der[offset++] !== 0x02) throw new Error("bad DER");
+            if (offset >= der.length) throw new Error("bad DER");
             let rLen = der[offset++];
+            if (offset + rLen > der.length) throw new Error("bad DER");
             let r = der.slice(offset, offset + rLen);
             offset += rLen;
-            if (der[offset++] !== 0x02) throw new Error("bad DER");
+            if (offset >= der.length || der[offset++] !== 0x02) throw new Error("bad DER");
+            if (offset >= der.length) throw new Error("bad DER");
             let sLen = der[offset++];
+            if (offset + sLen > der.length) throw new Error("bad DER");
             let s = der.slice(offset, offset + sLen);
             r = pad32(r);
             s = pad32(s);
