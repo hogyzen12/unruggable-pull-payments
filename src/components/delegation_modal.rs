@@ -11,7 +11,7 @@ use crate::timed_delegation::{
     build_withdraw_instructions, build_withdraw_message, decode_base64,
     derive_addresses, parse_nonce_from_state, DEFAULT_PROGRAM_ID, USDC_MINT,
 };
-use crate::wallet::WalletAdapter;
+use crate::wallet::{PasskeyEnv, WalletAdapter};
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
@@ -36,12 +36,14 @@ pub fn DelegationModal() -> Element {
     let mut passkey_pubkey_b64 = use_signal(|| String::new());
     let mut passkey_cred_id_b64 = use_signal(|| String::new());
     let mut passkey_status = use_signal(|| Option::<String>::None);
+    let mut passkey_env = use_signal(|| Option::<PasskeyEnv>::None);
 
     {
         let adapter = wallet.read().clone();
         let mut passkey_pubkey_b64 = passkey_pubkey_b64.clone();
         let mut passkey_cred_id_b64 = passkey_cred_id_b64.clone();
         let mut passkey_status = passkey_status.clone();
+        let mut passkey_env = passkey_env.clone();
         use_effect(move || {
             let adapter = adapter.clone();
             spawn(async move {
@@ -49,6 +51,9 @@ pub fn DelegationModal() -> Element {
                     passkey_pubkey_b64.set(passkey.pubkey_b64);
                     passkey_cred_id_b64.set(passkey.cred_id_b64);
                     passkey_status.set(Some("Passkey loaded".to_string()));
+                }
+                if let Ok(env) = adapter.passkey_env().await {
+                    passkey_env.set(Some(env));
                 }
             });
         });
@@ -75,6 +80,7 @@ pub fn DelegationModal() -> Element {
         let max_amount = delegate_amount.read().clone();
         let duration_hours = delegate_duration_hours.read().clone();
         let passkey_pubkey_b64 = passkey_pubkey_b64.read().clone();
+        let env = passkey_env.read().clone();
         let wallet_address = wallet_address.read().clone();
         spawn(async move {
             let Some(fee_payer) = wallet_address else {
@@ -84,6 +90,15 @@ pub fn DelegationModal() -> Element {
             if beneficiary.is_empty() {
                 status.set(Some("Enter beneficiary pubkey".to_string()));
                 return;
+            }
+            if let Some(env) = env {
+                if env.in_app || !env.supported || !env.platform {
+                    status.set(Some(format!(
+                        "Passkeys require {} in the system browser. Tap Open in Browser.",
+                        env.hint
+                    )));
+                    return;
+                }
             }
             if passkey_pubkey_b64.is_empty() {
                 status.set(Some("Register a passkey before delegating".to_string()));
@@ -197,7 +212,17 @@ pub fn DelegationModal() -> Element {
 
     let register_passkey = move |_| {
         let adapter = wallet.read().clone();
+        let env = passkey_env.read().clone();
         spawn(async move {
+            if let Some(env) = env {
+                if env.in_app || !env.supported || !env.platform {
+                    passkey_status.set(Some(format!(
+                        "Passkeys require {} in the system browser. Tap Open in Browser.",
+                        env.hint
+                    )));
+                    return;
+                }
+            }
             match adapter.register_passkey().await {
                 Ok(passkey) => {
                     passkey_pubkey_b64.set(passkey.pubkey_b64);
@@ -206,6 +231,15 @@ pub fn DelegationModal() -> Element {
                 }
                 Err(e) => passkey_status.set(Some(e)),
             }
+        });
+    };
+
+    let open_in_browser = move |_| {
+        let adapter = wallet.read().clone();
+        spawn(async move {
+            let _ = adapter
+                .open_system_browser("https://pull.unruggable.io")
+                .await;
         });
     };
 
@@ -329,6 +363,7 @@ pub fn DelegationModal() -> Element {
         let passkey_pubkey_b64 = passkey_pubkey_b64.read().clone();
         let passkey_cred_id_b64 = passkey_cred_id_b64.read().clone();
         let wallet_address = wallet_address.read().clone();
+        let env = passkey_env.read().clone();
         spawn(async move {
             let Some(beneficiary_wallet) = wallet_address else {
                 status.set(Some("Connect beneficiary wallet first".to_string()));
@@ -350,6 +385,15 @@ pub fn DelegationModal() -> Element {
             if passkey_pubkey_b64.is_empty() || passkey_cred_id_b64.is_empty() {
                 status.set(Some("Register/load a passkey first".to_string()));
                 return;
+            }
+            if let Some(env) = env {
+                if env.in_app || !env.supported || !env.platform {
+                    status.set(Some(format!(
+                        "Passkeys require {} in the system browser. Tap Open in Browser.",
+                        env.hint
+                    )));
+                    return;
+                }
             }
 
             let program_id = Pubkey::from_str(program_id.trim()).map_err(|e| e.to_string());
@@ -536,6 +580,14 @@ pub fn DelegationModal() -> Element {
                     button { onclick: create_delegation, style: "padding: 14px; border-radius: 10px; background: #1d4ed8; color: #fff; border: none; font-weight: 600;", "Delegate USDC" }
                     div { style: "padding: 10px; border-radius: 12px; background: #0b1220; border: 1px solid #334155; display: grid; gap: 8px;",
                         div { style: "font-size: 12px; color: #94a3b8;", "Passkey is required and is set automatically when you delegate." }
+                        if let Some(env) = passkey_env.read().as_ref() {
+                            if env.in_app || !env.supported || !env.platform {
+                                div { style: "padding: 10px; border-radius: 10px; background: #111827; border: 1px solid #ef4444; color: #fecaca; font-size: 12px;",
+                                    "Passkeys require {env.hint} in the system browser. In-app wallet browsers often block passkeys."
+                                }
+                                button { onclick: open_in_browser, style: "padding: 10px; border-radius: 10px; background: #ef4444; color: #fff; border: none; font-weight: 600;", "Open in Browser" }
+                            }
+                        }
                         div { style: "display: flex; gap: 8px;",
                             button { onclick: register_passkey, style: "flex: 1; padding: 10px; border-radius: 10px; background: #0f172a; color: #cbd5f5; border: 1px solid #334155;", "Register Passkey" }
                             button { onclick: load_passkey, style: "flex: 1; padding: 10px; border-radius: 10px; background: #0f172a; color: #cbd5f5; border: 1px solid #334155;", "Load Passkey" }
@@ -553,6 +605,14 @@ pub fn DelegationModal() -> Element {
                 div { style: "display: grid; gap: 8px; margin-bottom: 12px;",
                     div { style: "padding: 10px; border-radius: 10px; background: #0b1220; border: 1px solid #334155; color: #cbd5f5; font-size: 12px;",
                         "Connect as beneficiary, then withdraw using the passkey set by the delegator."
+                    }
+                    if let Some(env) = passkey_env.read().as_ref() {
+                        if env.in_app || !env.supported || !env.platform {
+                            div { style: "padding: 10px; border-radius: 10px; background: #111827; border: 1px solid #ef4444; color: #fecaca; font-size: 12px;",
+                                "Passkeys require {env.hint} in the system browser. In-app wallet browsers often block passkeys."
+                            }
+                            button { onclick: open_in_browser, style: "padding: 10px; border-radius: 10px; background: #ef4444; color: #fff; border: none; font-weight: 600;", "Open in Browser" }
+                        }
                     }
                     div { style: "display: flex; gap: 8px;",
                         button { onclick: move |_| {

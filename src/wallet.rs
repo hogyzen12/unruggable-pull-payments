@@ -28,6 +28,15 @@ pub struct PasskeySignature {
     pub signature_b64: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct PasskeyEnv {
+    pub supported: bool,
+    pub platform: bool,
+    #[serde(rename = "inApp")]
+    pub in_app: bool,
+    pub hint: String,
+}
+
 impl WalletAdapter {
     pub fn new() -> Self {
         Self {
@@ -171,6 +180,43 @@ impl WalletAdapter {
             return Ok(None);
         }
         from_value(value).map(Some).map_err(|e| e.to_string())
+    }
+
+    pub async fn passkey_env(&self) -> Result<PasskeyEnv, String> {
+        let window = web_sys::window().ok_or("window not available")?;
+        let td = js_sys::Reflect::get(&window, &JsValue::from_str("td"))
+            .map_err(|_| "td helper not found")?;
+        let env_fn = js_sys::Reflect::get(&td, &JsValue::from_str("passkeyEnv"))
+            .map_err(|_| "passkeyEnv not found")?;
+        let env_fn: js_sys::Function = env_fn
+            .dyn_into()
+            .map_err(|_| "passkeyEnv is not a function")?;
+        let result = env_fn.call0(&td).map_err(|_| "passkeyEnv failed")?;
+        if result.is_instance_of::<js_sys::Promise>() {
+            let promise: js_sys::Promise = result
+                .dyn_into()
+                .map_err(|_| "passkeyEnv didn't return promise")?;
+            let value = wasm_bindgen_futures::JsFuture::from(promise)
+                .await
+                .map_err(js_error_to_string)?;
+            return from_value(value).map_err(|e| e.to_string());
+        }
+        from_value(result).map_err(|e| e.to_string())
+    }
+
+    pub async fn open_system_browser(&self, url: &str) -> Result<(), String> {
+        let window = web_sys::window().ok_or("window not available")?;
+        let td = js_sys::Reflect::get(&window, &JsValue::from_str("td"))
+            .map_err(|_| "td helper not found")?;
+        let open_fn = js_sys::Reflect::get(&td, &JsValue::from_str("openSystemBrowser"))
+            .map_err(|_| "openSystemBrowser not found")?;
+        let open_fn: js_sys::Function = open_fn
+            .dyn_into()
+            .map_err(|_| "openSystemBrowser is not a function")?;
+        open_fn
+            .call1(&td, &JsValue::from_str(url))
+            .map_err(|_| "openSystemBrowser failed")?;
+        Ok(())
     }
 
     pub async fn sign_passkey(

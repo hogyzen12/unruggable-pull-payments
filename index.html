@@ -246,6 +246,44 @@
                     return null;
                 }
             },
+            async passkeyEnv() {
+                const ua = navigator.userAgent || "";
+                const supported = !!window.PublicKeyCredential;
+                let platform = false;
+                try {
+                    if (supported && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
+                        platform = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+                    }
+                } catch (e) {
+                    platform = false;
+                }
+                const mobile = /Android|iPhone|iPad|iPod/i.test(ua);
+                const webview = /(wv|WebView|FBAN|FBAV|Instagram|Line|Telegram|WeChat|TikTok)/i.test(ua);
+                const wallet = /(Phantom|Backpack|Solflare|CoinbaseWallet|Trust|MetaMask|OKApp|Binance|imToken|TokenPocket|MathWallet|SafePal)/i.test(ua);
+                const inApp = mobile && (webview || wallet);
+                const hint = /iPhone|iPad|iPod/i.test(ua) ? "Safari" : "Chrome";
+                return { supported, platform, inApp, hint };
+            },
+            openSystemBrowser(url) {
+                const target = url || window.location.href;
+                try {
+                    const a = document.createElement("a");
+                    a.href = target;
+                    a.target = "_blank";
+                    a.rel = "noopener";
+                    a.click();
+                } catch (e) {
+                    // ignore
+                }
+                setTimeout(() => {
+                    try {
+                        window.location.href = target;
+                    } catch (e) {
+                        // ignore
+                    }
+                }, 150);
+                return true;
+            },
             async signPasskey(challengeB64, credIdB64) {
                 if (!window.PublicKeyCredential) {
                     throw new Error("Passkeys not supported");
