@@ -1,0 +1,348 @@
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Swap Website</title>
+    
+    
+    <script src="https://cdn.jsdelivr.net/gh/hogyzen12/unruggable-app@solana-3x-tpu-test/assets/liquid_metal_component.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/hogyzen12/unruggable-app@solana-3x-tpu-test/assets/liquid_metal_svg.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/hogyzen12/unruggable-app@solana-3x-tpu-test/assets/liquid_metal_border.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/hogyzen12/unruggable-app@solana-3x-tpu-test/assets/liquid_metal_circle_border.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/hogyzen12/unruggable-app@solana-3x-tpu-test/assets/liquid_metal_circle.js"></script>
+    <script src="https://unpkg.com/@solana/web3.js@1.95.4/lib/index.iife.js"></script>
+    <script>
+        function tdProvider() {
+            if (window.solana && (window.solana.isBackpack || window.solana.isPhantom)) {
+                return window.solana;
+            }
+            if (window.solana && Array.isArray(window.solana.providers)) {
+                const provider = window.solana.providers.find(p => p.isBackpack || p.isPhantom);
+                if (provider) return provider;
+            }
+            return window.solana;
+        }
+
+        function bufToB64(buf) {
+            const bytes = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+            let binary = "";
+            for (let i = 0; i < bytes.length; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary);
+        }
+
+        function b64ToBuf(b64) {
+            const binary = atob(b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+        }
+
+        function readCborLen(addl, data, offset) {
+            if (addl < 24) return [addl, offset];
+            if (addl === 24) return [data[offset], offset + 1];
+            if (addl === 25) return [(data[offset] << 8) | data[offset + 1], offset + 2];
+            if (addl === 26) {
+                return [
+                    (data[offset] << 24) | (data[offset + 1] << 16) | (data[offset + 2] << 8) | data[offset + 3],
+                    offset + 4,
+                ];
+            }
+            throw new Error("CBOR length too large");
+        }
+
+        function cborDecode(data, offset = 0) {
+            const head = data[offset++];
+            const major = head >> 5;
+            const addl = head & 0x1f;
+            if (major === 0) {
+                const [len, next] = readCborLen(addl, data, offset);
+                return [len, next];
+            }
+            if (major === 1) {
+                const [len, next] = readCborLen(addl, data, offset);
+                return [-1 - len, next];
+            }
+            if (major === 2) {
+                const [len, next] = readCborLen(addl, data, offset);
+                return [data.slice(next, next + len), next + len];
+            }
+            if (major === 3) {
+                const [len, next] = readCborLen(addl, data, offset);
+                const slice = data.slice(next, next + len);
+                return [new TextDecoder().decode(slice), next + len];
+            }
+            if (major === 4) {
+                const [len, next] = readCborLen(addl, data, offset);
+                let items = [];
+                let cur = next;
+                for (let i = 0; i < len; i++) {
+                    const [val, n] = cborDecode(data, cur);
+                    items.push(val);
+                    cur = n;
+                }
+                return [items, cur];
+            }
+            if (major === 5) {
+                const [len, next] = readCborLen(addl, data, offset);
+                let map = new Map();
+                let cur = next;
+                for (let i = 0; i < len; i++) {
+                    const [key, n1] = cborDecode(data, cur);
+                    const [val, n2] = cborDecode(data, n1);
+                    map.set(key, val);
+                    cur = n2;
+                }
+                return [map, cur];
+            }
+            throw new Error("Unsupported CBOR type");
+        }
+
+        function pad32(bytes) {
+            if (bytes.length === 32) return bytes;
+            const out = new Uint8Array(32);
+            out.set(bytes, 32 - bytes.length);
+            return out;
+        }
+
+        function parseAuthData(authData) {
+            if (authData.length < 55) {
+                throw new Error("authData too short");
+            }
+            const flags = authData[32];
+            const attested = (flags & 0x40) !== 0;
+            if (!attested) {
+                throw new Error("attested credential data missing");
+            }
+            const credIdLen = (authData[53] << 8) | authData[54];
+            const credIdStart = 55;
+            const credIdEnd = credIdStart + credIdLen;
+            const credId = authData.slice(credIdStart, credIdEnd);
+            const coseData = authData.slice(credIdEnd);
+            const [coseMap] = cborDecode(coseData, 0);
+            const x = pad32(coseMap.get(-2));
+            const y = pad32(coseMap.get(-3));
+            const prefix = (y[y.length - 1] & 1) ? 0x03 : 0x02;
+            const compressed = new Uint8Array(33);
+            compressed[0] = prefix;
+            compressed.set(x, 1);
+            return { credId, pubkey: compressed };
+        }
+
+        function derToRawSig(der) {
+            let offset = 0;
+            if (der[offset++] !== 0x30) throw new Error("bad DER");
+            let len = der[offset++];
+            if (len & 0x80) {
+                const n = len & 0x7f;
+                len = 0;
+                for (let i = 0; i < n; i++) {
+                    len = (len << 8) | der[offset++];
+                }
+            }
+            if (der[offset++] !== 0x02) throw new Error("bad DER");
+            let rLen = der[offset++];
+            let r = der.slice(offset, offset + rLen);
+            offset += rLen;
+            if (der[offset++] !== 0x02) throw new Error("bad DER");
+            let sLen = der[offset++];
+            let s = der.slice(offset, offset + sLen);
+            r = pad32(r);
+            s = pad32(s);
+            const out = new Uint8Array(64);
+            out.set(r, 0);
+            out.set(s, 32);
+            return out;
+        }
+
+        window.td = {
+            async signMessage(messageB64) {
+                const provider = tdProvider();
+                if (!provider) {
+                    throw new Error("Wallet not found");
+                }
+                console.log("[td] signMessage request", { messageB64Len: messageB64.length });
+                const msg = Uint8Array.from(atob(messageB64), c => c.charCodeAt(0));
+                if (!provider.isConnected && provider.connect) {
+                    await provider.connect();
+                }
+                if (!provider.signMessage) {
+                    throw new Error("signMessage not supported by this wallet");
+                }
+                let res;
+                if (provider.isPhantom) {
+                    res = await provider.signMessage(msg, "hex");
+                } else {
+                    res = await provider.signMessage(msg);
+                }
+                const sig = res.signature;
+                console.log("[td] signMessage ok");
+                return btoa(String.fromCharCode(...sig));
+            },
+            async registerPasskey() {
+                if (!window.PublicKeyCredential) {
+                    throw new Error("Passkeys not supported");
+                }
+                const challenge = crypto.getRandomValues(new Uint8Array(32));
+                const userId = crypto.getRandomValues(new Uint8Array(16));
+                const stored = window.td.getStoredPasskey?.();
+                const exclude = stored && stored.credIdB64 ? [{ type: "public-key", id: b64ToBuf(stored.credIdB64) }] : [];
+                const credential = await navigator.credentials.create({
+                    publicKey: {
+                        challenge,
+                        rp: {
+                            name: "Timed Delegation",
+                            id: window.location.hostname || undefined,
+                        },
+                        user: {
+                            id: userId,
+                            name: "timed-delegation",
+                            displayName: "Timed Delegation",
+                        },
+                        pubKeyCredParams: [
+                            { type: "public-key", alg: -7 },    // ES256
+                            { type: "public-key", alg: -257 },  // RS256 (compat)
+                        ],
+                        excludeCredentials: exclude,
+                        timeout: 60000,
+                        attestation: "none",
+                        authenticatorSelection: {
+                            residentKey: "preferred",
+                            userVerification: "required",
+                        },
+                    },
+                });
+                const attObj = new Uint8Array(credential.response.attestationObject);
+                const [attMap] = cborDecode(attObj, 0);
+                const authData = attMap.get("authData");
+                const parsed = parseAuthData(authData);
+                const credIdB64 = bufToB64(parsed.credId);
+                const pubkeyB64 = bufToB64(parsed.pubkey);
+                localStorage.setItem("td_passkey", JSON.stringify({ credIdB64, pubkeyB64 }));
+                return { credIdB64, pubkeyB64 };
+            },
+            getStoredPasskey() {
+                const raw = localStorage.getItem("td_passkey");
+                if (!raw) return null;
+                try {
+                    return JSON.parse(raw);
+                } catch (e) {
+                    return null;
+                }
+            },
+            async signPasskey(challengeB64, credIdB64) {
+                if (!window.PublicKeyCredential) {
+                    throw new Error("Passkeys not supported");
+                }
+                const challenge = b64ToBuf(challengeB64);
+                const credId = b64ToBuf(credIdB64);
+                const assertion = await navigator.credentials.get({
+                    publicKey: {
+                        challenge,
+                        allowCredentials: [{ type: "public-key", id: credId }],
+                        timeout: 60000,
+                        userVerification: "required",
+                    },
+                });
+                const authData = new Uint8Array(assertion.response.authenticatorData);
+                const clientData = new Uint8Array(assertion.response.clientDataJSON);
+                const sigDer = new Uint8Array(assertion.response.signature);
+                const sigRaw = derToRawSig(sigDer);
+                return {
+                    authenticatorDataB64: bufToB64(authData),
+                    clientDataJsonB64: bufToB64(clientData),
+                    signatureB64: bufToB64(sigRaw),
+                };
+            },
+            async sendInstructions(rpcUrl, feePayer, instructionsJson) {
+                const provider = tdProvider();
+                if (!provider) {
+                    throw new Error("Wallet not found");
+                }
+                try {
+                    const instructions = JSON.parse(instructionsJson);
+                    console.log("[td] sendInstructions", {
+                        rpcUrl,
+                        feePayer,
+                        instructionCount: instructions.length,
+                    });
+                    const connection = new solanaWeb3.Connection(rpcUrl, "confirmed");
+                    const tx = new solanaWeb3.Transaction();
+
+                    instructions.forEach(ix => {
+                        tx.add(
+                            new solanaWeb3.TransactionInstruction({
+                                programId: new solanaWeb3.PublicKey(ix.program_id),
+                                keys: ix.keys.map(k => ({
+                                    pubkey: new solanaWeb3.PublicKey(k.pubkey),
+                                    isSigner: k.is_signer,
+                                    isWritable: k.is_writable,
+                                })),
+                                data: Uint8Array.from(atob(ix.data), c => c.charCodeAt(0)),
+                            })
+                        );
+                    });
+
+                    tx.feePayer = new solanaWeb3.PublicKey(feePayer);
+                    const latest = await connection.getLatestBlockhash();
+                    tx.recentBlockhash = latest.blockhash;
+                    console.log("[td] blockhash", latest.blockhash);
+
+                    if (!provider.isConnected && provider.connect) {
+                        await provider.connect();
+                    }
+                    const signed = await provider.signTransaction(tx);
+                    console.log("[td] transaction signed");
+                    const sig = await connection.sendRawTransaction(signed.serialize());
+                    console.log("[td] sent", sig);
+                    await connection.confirmTransaction(sig, "confirmed");
+                    console.log("[td] confirmed", sig);
+                    return sig;
+                } catch (err) {
+                    console.error("[td] sendInstructions error", err);
+                    throw err;
+                }
+            },
+        };
+    </script>
+    
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #020617;
+            color: white;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { 
+                opacity: 0.4; 
+                transform: scale(0.8); 
+            }
+            50% { 
+                opacity: 1; 
+                transform: scale(1.2); 
+            }
+        }
+        
+        .pulse-loader {
+            animation: pulse 1.5s ease-in-out infinite;
+        }
+        
+        .pulse-delay-1 {
+            animation-delay: 0.2s;
+        }
+        
+        .pulse-delay-2 {
+            animation-delay: 0.4s;
+        }
+    </style>
+</head>
+<body>
+    <div id="main"></div>
+</body>
+</html>

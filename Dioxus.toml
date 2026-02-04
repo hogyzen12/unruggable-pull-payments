@@ -1,0 +1,20 @@
+[application]
+name = "swap-website"
+default_platform = "web"
+asset_dir = "assets"
+
+[web.app]
+title = "Solana Swap"
+base_path = ""
+
+[web.watcher]
+reload_html = true
+watch_path = ["src", "assets"]
+
+[web.resource.dev]
+style = []
+script = []
+
+[bundle]
+identifier = "com.swap-website"
+publisher = "Swap"
